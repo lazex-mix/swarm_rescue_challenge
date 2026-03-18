@@ -8,8 +8,6 @@ import sys
 from pathlib import Path
 from typing import List, Type
 from enum import Enum
-import cv2
-import numpy as np
 
 # Insert the parent directory of the current file's directory into sys.path.
 # This allows Python to locate modules that are one level above the current
@@ -18,109 +16,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from swarm_rescue.simulation.drone.controller import CommandsDict
 from swarm_rescue.simulation.drone.drone_abstract import DroneAbstract
-from swarm_rescue.simulation.utils.constants import MAX_RANGE_LIDAR_SENSOR
-from swarm_rescue.simulation.utils.grid import Grid
-from swarm_rescue.simulation.utils.pose import Pose
 from swarm_rescue.simulation.ray_sensors.drone_semantic_sensor import DroneSemanticSensor
 from swarm_rescue.simulation.elements.rescue_center import RescueCenter
 from swarm_rescue.simulation.elements.return_area import ReturnArea
 from swarm_rescue.simulation.elements.wounded_person import WoundedPerson
 from swarm_rescue.simulation.gui_map.closed_playground import ClosedPlayground
 from swarm_rescue.simulation.gui_map.gui_sr import GuiSR
-from swarm_rescue.maps.map_intermediate_01 import MapIntermediate01
 from swarm_rescue.simulation.gui_map.map_abstract import MapAbstract
 from swarm_rescue.simulation.utils.misc_data import MiscData
 
 
-from swarm_rescue.team_du_sud.geometry import Point, Line, Box, build_box_with_line_and_point, detect_local_zones, build_box_with_2_opposite_points
-from swarm_rescue.team_du_sud.walls_keyboard import add_walls
-
-class OccupancyGrid(Grid):
-    """Simple occupancy grid"""
-
-    def __init__(self,
-                 size_area_world,
-                 resolution: float,
-                 lidar):
-        super().__init__(size_area_world=size_area_world,
-                         resolution=resolution)
-
-        self.size_area_world = size_area_world
-        self.resolution = resolution
-
-        self.lidar = lidar
-
-        self.x_max_grid: int = int(self.size_area_world[0] / self.resolution
-                                   + 0.5)
-        self.y_max_grid: int = int(self.size_area_world[1] / self.resolution
-                                   + 0.5)
-
-        self.grid = np.zeros((self.x_max_grid, self.y_max_grid))
-        self.zoomed_grid = np.empty((self.x_max_grid, self.y_max_grid))
-
-    def update_grid(self, pose: Pose):
-        """
-        Bayesian map update with new observation
-        lidar : lidar data
-        pose : corrected pose in world coordinates
-        """
-        EVERY_N = 3
-        LIDAR_DIST_CLIP = 40.0
-        EMPTY_ZONE_VALUE = -0.602
-        OBSTACLE_ZONE_VALUE = 2.0
-        FREE_ZONE_VALUE = -4.0
-        THRESHOLD_MIN = -40
-        THRESHOLD_MAX = 40
-
-        lidar_dist = self.lidar.get_sensor_values()[::EVERY_N].copy()
-        lidar_angles = self.lidar.ray_angles[::EVERY_N].copy()
-
-        # Compute cos and sin of the absolute angle of the lidar
-        cos_rays = np.cos(lidar_angles + pose.orientation)
-        sin_rays = np.sin(lidar_angles + pose.orientation)
-
-        max_range = MAX_RANGE_LIDAR_SENSOR * 0.9
-
-        # For empty zones
-        # points_x and point_y contains the border of detected empty zone
-        # We use a value a little bit less than LIDAR_DIST_CLIP because of the
-        # noise in lidar
-        lidar_dist_empty = np.maximum(lidar_dist - LIDAR_DIST_CLIP, 0.0)
-        # All values of lidar_dist_empty_clip are now <= max_range
-        lidar_dist_empty_clip = np.minimum(lidar_dist_empty, max_range)
-        points_x = pose.position[0] + np.multiply(lidar_dist_empty_clip,
-                                                  cos_rays)
-        points_y = pose.position[1] + np.multiply(lidar_dist_empty_clip,
-                                                  sin_rays)
-
-        for pt_x, pt_y in zip(points_x, points_y):
-            self.add_value_along_line(pose.position[0], pose.position[1],
-                                      pt_x, pt_y,
-                                      EMPTY_ZONE_VALUE)
-
-        # For obstacle zones, all values of lidar_dist are < max_range
-        select_collision = lidar_dist < max_range
-
-        points_x = pose.position[0] + np.multiply(lidar_dist, cos_rays)
-        points_y = pose.position[1] + np.multiply(lidar_dist, sin_rays)
-
-        points_x = points_x[select_collision]
-        points_y = points_y[select_collision]
-
-        self.add_points(points_x, points_y, OBSTACLE_ZONE_VALUE)
-
-        # the current position of the drone is free !
-        self.add_points(pose.position[0], pose.position[1], FREE_ZONE_VALUE)
-
-        # threshold values
-        self.grid = np.clip(self.grid, THRESHOLD_MIN, THRESHOLD_MAX)
-
-        # compute zoomed grid for displaying
-        self.zoomed_grid = self.grid.copy()
-        new_zoomed_size = (int(self.size_area_world[1] * 0.5),
-                           int(self.size_area_world[0] * 0.5))
-        self.zoomed_grid = cv2.resize(self.zoomed_grid, new_zoomed_size,
-                                      interpolation=cv2.INTER_NEAREST)
+from swarm_rescue.lazex.geometry import Point, Line, Box, build_box_with_line_and_point, detect_local_zones, build_box_with_2_opposite_points
+from swarm_rescue.lazex.walls_keyboard import add_walls
 
 # Classe où le drône stocke les données importantes de la map
 class Stockage():
@@ -269,13 +176,6 @@ class MyDroneTest(DroneAbstract):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-        self.iteration: int = 0
-        self.estimated_pose = Pose()
-        resolution = 8
-        self.grid = OccupancyGrid(size_area_world=self.size_area,
-                                  resolution=resolution,
-                                  lidar=self.lidar())
-
         self.last_inside = False
         self.data = Stockage()
         self.path = Path()
@@ -292,22 +192,7 @@ class MyDroneTest(DroneAbstract):
                                  "lateral": 0.0,
                                  "rotation": 0.0,
                                  "grasper": 0}
-    
-        self.iteration += 1
-
-        # UPDATING THE OCCUPANCY GRID
-        self.estimated_pose = Pose(np.asarray(self.measured_gps_position()),
-                                   self.measured_compass_angle())
-
-        self.grid.update_grid(pose=self.estimated_pose)
-        if self.iteration % 5 == 0:
-            self.grid.display(self.grid.grid,
-                              self.estimated_pose,
-                              title="occupancy grid")
-            self.grid.display(self.grid.zoomed_grid,
-                              self.estimated_pose,
-                              title="zoomed occupancy grid")
-    
+        
         # EXPLORING STATE
         if self.state == self.Activity.EXPLORING:
 
@@ -425,6 +310,7 @@ class MyMapKeyboard(MapAbstract):
             self._drones.append(drone)
             self._playground.add(drone, self._drones_pos[i])
 
+
 def print_keyboard_man():
     print("How to use the keyboard to direct the drone?")
     print("\t- up / down key : forward and backward")
@@ -442,13 +328,13 @@ def print_keyboard_man():
 
 def main():
     print_keyboard_man()
-    the_map = MapIntermediate01(drone_type=MyDroneTest)
+    the_map = MyMapKeyboard(drone_type=MyDroneTest)
 
     # draw_lidar_rays : enable the visualization of the lidar rays
     # draw_semantic_rays : enable the visualization of the semantic rays
     gui = GuiSR(the_map=the_map,
-                draw_lidar_rays=False,
-                draw_semantic_rays=False,
+                draw_lidar_rays=True,
+                draw_semantic_rays=True,
                 use_keyboard=True,
                 )
     gui.run()
